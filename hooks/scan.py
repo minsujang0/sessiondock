@@ -131,6 +131,30 @@ STOCK_CLAUDE_BUNDLE = "com.anthropic.claudefordesktop"
 CLAUDE_SESSION_DIR = "claude-code-sessions"
 
 
+CLAUDE_CLI_DIR = "ClaudeConfig"
+
+
+def claude_roots():
+    """Every directory of Claude Code transcripts, newest-first per root.
+
+    The rows come from transcripts, not from the app's own records, so a
+    session whose transcript is not read never appears however well the app
+    records are paired up. A Parallelly clone runs the CLI against its own
+    config directory inside its profile, which is why the clone's work was
+    missing even though the clone itself was being found.
+    """
+    roots = [CLAUDE_ROOT]
+    try:
+        profiles = os.listdir(PARALLELLY_PROFILES)
+    except OSError:
+        profiles = []
+    for profile in profiles:
+        root = os.path.join(PARALLELLY_PROFILES, profile, CLAUDE_CLI_DIR, "projects")
+        if os.path.isdir(root):
+            roots.append(root)
+    return [root for root in roots if os.path.isdir(root)]
+
+
 def claude_homes():
     """Each directory of Claude session records, paired with its app.
 
@@ -690,7 +714,12 @@ def settle(state, touched, now):
 
 def claude_sessions():
     titles = claude_titles()
-    for path, mtime in newest_files(CLAUDE_ROOT, ".jsonl"):
+    for root in claude_roots():
+        yield from _claude_sessions_in(root, titles)
+
+
+def _claude_sessions_in(root, titles):
+    for path, mtime in newest_files(root, ".jsonl"):
         if time.time() - mtime > KEEP_WINDOW:
             break
         session_id = os.path.basename(path)[:-len(".jsonl")]
