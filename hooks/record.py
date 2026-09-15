@@ -121,12 +121,65 @@ def owning_app(pid):
     return ""
 
 
+# Transcript directories the hooks have seen, shared with the scan.
+KNOWN_ROOTS = os.path.join(STATE_DIR, "roots.json")
+
+
+def register_home(tool, payload):
+    """Note the transcript directory this session is writing to.
+
+    Claude Code hands every hook a `transcript_path`; the directory holding
+    the per-project folders is its parent's parent. Codex passes the rollout
+    file the same way. Either way the path is the session's own, so no layout
+    has to be guessed at.
+    """
+    raw = ""
+    for key in ("transcript_path", "rollout_path", "rollout-path"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            raw = value.strip()
+            break
+    if not raw:
+        return
+    # <root>/<project folder>/<session>.jsonl
+    root = os.path.dirname(os.path.dirname(os.path.realpath(os.path.expanduser(raw))))
+    if not os.path.isdir(root):
+        return
+
+    try:
+        with open(KNOWN_ROOTS) as fh:
+            held = json.load(fh)
+        if not isinstance(held, dict):
+            held = {}
+    except (IOError, OSError, ValueError):
+        held = {}
+    if root in held.get(tool, []):
+        return
+    held.setdefault(tool, []).append(root)
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        own_only(STATE_DIR, 0o700)
+        tmp = KNOWN_ROOTS + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(held, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, KNOWN_ROOTS)
+        own_only(KNOWN_ROOTS, 0o600)
+    except OSError:
+        pass
+
+
 def main():
     payload = read_payload()
     event = event_name()
     state = STATES.get(event, "")
 
     tool = "codex" if event in ("turn-ended", "agent-turn-complete") else "claude"
+
+    # Where this session's transcripts live. A hook runs inside the session,
+    # so it knows; the scan has to guess at directory layouts and only knows
+    # the arrangements someone thought to write down. Noting it here is what
+    # lets a copy of the app nobody has heard of be picked up anyway.
+    register_home(tool, payload)
     session_id = (payload.get("session_id") or payload.get("thread-id")
                   or payload.get("threadId") or os.environ.get("CLAUDE_SESSION_ID")
                   or "unknown")

@@ -37,23 +37,37 @@ def own_only(path, mode):
     except OSError:
         pass
 
-CLAUDE_ROOT = os.path.expanduser("~/.claude/projects")
+def _home(variable, fallback):
+    """The home a tool was told to use, or the one it documents by default.
+
+    `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are the only knobs either tool
+    promises, so they come first. Anyone who moved their home by hand was
+    invisible before this, which is a far commoner arrangement than any
+    particular cloning app.
+    """
+    told = os.environ.get(variable, "").strip()
+    return os.path.expanduser(told or fallback)
+
+
+CLAUDE_HOME = _home("CLAUDE_CONFIG_DIR", "~/.claude")
+CLAUDE_ROOT = os.path.join(CLAUDE_HOME, "projects")
 # The desktop app keeps a record per session with the summarised title it shows
 # in its sidebar — the real title, not the first thing that was typed. The
 # transcripts under CLAUDE_ROOT carry no title at all, so this is the only
 # place to get one.
 CLAUDE_SESSIONS = os.path.expanduser(
     "~/Library/Application Support/Claude/claude-code-sessions")
-CODEX_ROOT = os.path.expanduser("~/.codex/sessions")
+CODEX_HOME = _home("CODEX_HOME", "~/.codex")
+CODEX_ROOT = os.path.join(CODEX_HOME, "sessions")
 # Codex keeps its own index of every thread, with the user's messages stored
 # apart from the preamble it injects — a far cleaner title source than the
 # rollout files. Claude Code has no equivalent: its transcripts carry no
 # summary entries at all, so there the first user message is the best we get.
-CODEX_DB = os.path.expanduser("~/.codex/thread_history_1.sqlite")
+CODEX_DB = os.path.join(CODEX_HOME, "thread_history_1.sqlite")
 # Codex's own thread index: the title it shows in its sidebar, plus the working
 # directory and the path to the rollout file. Far better than inferring any of
 # it from the transcript.
-CODEX_STATE_DB = os.path.expanduser("~/.codex/state_5.sqlite")
+CODEX_STATE_DB = os.path.join(CODEX_HOME, "state_5.sqlite")
 
 # Every copy of the Codex app registers the codex:// scheme, so the OS hands a
 # deep link to whichever one it picked rather than the one the thread lives in.
@@ -108,7 +122,7 @@ def codex_home_owners():
         if profile:
             clones[profile.upper()] = bundle
         elif bundle_value(bundle, "CFBundleIdentifier") == STOCK_CODEX_BUNDLE:
-            owners[os.path.realpath(os.path.expanduser("~/.codex"))] = bundle
+            owners[os.path.realpath(CODEX_HOME)] = bundle
 
     try:
         profiles = os.listdir(PARALLELLY_PROFILES)
@@ -134,6 +148,48 @@ CLAUDE_SESSION_DIR = "claude-code-sessions"
 CLAUDE_CLI_DIR = "ClaudeConfig"
 
 
+# Homes that told us about themselves. A hook runs inside the session, so it
+# knows its own transcript path without anyone having to guess at directory
+# layouts; scan.py just reads what they left. This is the part that needs no
+# knowledge of any particular wrapper or cloning app.
+KNOWN_ROOTS = os.path.join(STATE_DIR, "roots.json")
+
+
+def remember_root(kind, root):
+    """Note a transcript directory a hook actually ran in."""
+    root = os.path.realpath(os.path.expanduser(root))
+    if not os.path.isdir(root):
+        return
+    held = recall_roots()
+    if root in held.get(kind, []):
+        return
+    held.setdefault(kind, []).append(root)
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        own_only(STATE_DIR, 0o700)
+        tmp = KNOWN_ROOTS + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(held, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, KNOWN_ROOTS)
+        own_only(KNOWN_ROOTS, 0o600)
+    except OSError:
+        pass
+
+
+def recall_roots(kind=None):
+    """What the hooks have registered, dropping anything since deleted."""
+    try:
+        with open(KNOWN_ROOTS) as fh:
+            held = json.load(fh)
+    except (IOError, OSError, ValueError):
+        held = {}
+    if not isinstance(held, dict):
+        held = {}
+    if kind is None:
+        return held
+    return [r for r in held.get(kind, []) if os.path.isdir(r)]
+
+
 def claude_roots():
     """Every directory of Claude Code transcripts, newest-first per root.
 
@@ -143,7 +199,7 @@ def claude_roots():
     config directory inside its profile, which is why the clone's work was
     missing even though the clone itself was being found.
     """
-    roots = [CLAUDE_ROOT]
+    roots = [CLAUDE_ROOT] + recall_roots("claude")
     try:
         profiles = os.listdir(PARALLELLY_PROFILES)
     except OSError:
@@ -152,7 +208,13 @@ def claude_roots():
         root = os.path.join(PARALLELLY_PROFILES, profile, CLAUDE_CLI_DIR, "projects")
         if os.path.isdir(root):
             roots.append(root)
-    return [root for root in roots if os.path.isdir(root)]
+    seen, out = set(), []
+    for root in roots:
+        real = os.path.realpath(root)
+        if real not in seen and os.path.isdir(real):
+            seen.add(real)
+            out.append(real)
+    return out
 
 
 def claude_homes():
@@ -255,16 +317,28 @@ def is_human_turn(entry):
     return bool(content.strip()) and not content.lstrip().startswith(SYNTHETIC_PREFIXES)
 
 
+# Only one of these puts a message on the queue. Everything else takes one
+# off — a message can be dequeued to run, but it can also be removed by hand
+# or cleared along with the rest, and counting only dequeue left the depth
+# permanently above zero. A session in that state spun forever: the queue
+# check runs before the transcript is read at all, so the end of the file
+# never got a say.
+QUEUE_ADDS = "enqueue"
+
+
 def queued(entries):
     """Whether messages are still lined up behind the current turn."""
     depth = 0
     for entry in entries:
         if entry.get("type") != "queue-operation":
             continue
-        if entry.get("operation") == "enqueue":
+        if entry.get("operation") == QUEUE_ADDS:
             depth += 1
-        elif entry.get("operation") == "dequeue":
-            depth -= 1
+        else:
+            # Anything else took a message off. Held at zero because the tail
+            # is a window: its first entries can be the removals of messages
+            # queued further back than we can see.
+            depth = max(depth - 1, 0)
     return depth > 0
 
 
