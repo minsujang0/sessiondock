@@ -168,6 +168,19 @@ def register_home(tool, payload):
         pass
 
 
+def started_at(pid):
+    """When a process began, as a timestamp, or 0 if it cannot be read."""
+    try:
+        out = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "lstart="],
+                             capture_output=True, text=True, timeout=5).stdout
+        text = " ".join(out.split())
+        if not text:
+            return 0.0
+        return time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
 def main():
     payload = read_payload()
     event = event_name()
@@ -241,7 +254,14 @@ def main():
         "event": event,
         "updated": time.time(),
         "started": previous.get("started") or time.time(),
-        "pid": previous.get("pid") or os.getppid(),
+        # Refreshed every time, not kept from the first event: a session
+        # resumed in a new process kept pointing at the old one, which is
+        # either dead or, worse, something else that inherited the number.
+        "pid": os.getppid(),
+        # What that number means. macOS hands pids out again, so the number
+        # alone cannot say whether the process answering to it is still the
+        # one that was running this session.
+        "born": started_at(os.getppid()),
         "app": previous.get("app") or owning_app(os.getppid()),
         "chat": chat,
         # Handed to this run by another agent, rather than typed by a person.

@@ -774,6 +774,43 @@ def last_spoken(entries):
     return 0
 
 
+def running(pid, born, slack=2.0):
+    """Whether the process that was driving a session is still the one there.
+
+    A pid on its own is not an answer: macOS hands the numbers out again, so
+    a long-finished session can point at something entirely unrelated that
+    happens to be alive now. The birth time settles it — a recycled pid comes
+    with a process younger than the record that named it.
+    """
+    if not pid:
+        return None                  # nothing was ever recorded; no opinion
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (OSError, ValueError):
+        return None                  # no permission to ask, so no opinion
+    if not born:
+        return True                  # alive, and nothing to check it against
+    now_born = process_born(pid)
+    if not now_born:
+        return True
+    return abs(now_born - float(born)) <= slack
+
+
+def process_born(pid):
+    """When the process holding this pid began, or 0 if it cannot be read."""
+    try:
+        out = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "lstart="],
+                             capture_output=True, text=True, timeout=5).stdout
+        text = " ".join(out.split())
+        if not text:
+            return 0.0
+        return time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return 0.0
+
+
 def settle(state, touched, now):
     """A turn nothing has written to in a long while has stopped.
 
@@ -969,6 +1006,17 @@ def main():
                     # behind for good.
                     settled = existing.get("state") == "working" and (
                         now - float(existing.get("updated", 0)) > WORKING_WINDOW)
+
+                    # The process that was doing the work is gone, so the work
+                    # is too, whatever the last event said. A hook only fires
+                    # while the session is alive, so a crash or a quit leaves
+                    # "working" behind with nothing to take it back — which is
+                    # what left rows spinning until the stall window ran out
+                    # ten minutes later. This costs one signal-zero.
+                    if existing.get("state") == "working" and running(
+                            existing.get("pid"), existing.get("born")) is False:
+                        existing["state"] = "waiting"
+                        changed = True
                     if state and tool == "codex" and mtime > float(existing.get("updated", 0)):
                         if state != existing.get("state"):
                             existing["state"] = state
