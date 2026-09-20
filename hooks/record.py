@@ -257,11 +257,15 @@ def main():
         # Refreshed every time, not kept from the first event: a session
         # resumed in a new process kept pointing at the old one, which is
         # either dead or, worse, something else that inherited the number.
-        "pid": os.getppid(),
+        # Claude runs its hooks as children of the session, so the parent is
+        # the session itself. Codex rings through a notify script that has
+        # exited by the time anyone asks, so there is no process worth naming
+        # and a number here would only be read as a dead session.
+        "pid": os.getppid() if tool == "claude" else 0,
         # What that number means. macOS hands pids out again, so the number
         # alone cannot say whether the process answering to it is still the
         # one that was running this session.
-        "born": started_at(os.getppid()),
+        "born": started_at(os.getppid()) if tool == "claude" else 0,
         "app": previous.get("app") or owning_app(os.getppid()),
         "chat": chat,
         # Handed to this run by another agent, rather than typed by a person.

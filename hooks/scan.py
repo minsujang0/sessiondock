@@ -1024,8 +1024,15 @@ def main():
                     # kernel. It ran before the transcript had its say and was
                     # being overruled by it, which is how a finished Doosan
                     # run kept its spinner.
-                    if existing.get("state") == "working" and running(
-                            existing.get("pid"), existing.get("born")) is False:
+                    # Claude only. Its hooks run as children of the session
+                    # process, so the recorded pid is the session. Codex rings
+                    # through a notify script that exits immediately, so its
+                    # pid is dead within seconds of every turn and reading it
+                    # as "the work stopped" marked every running Codex session
+                    # finished.
+                    if (tool == "claude" and existing.get("state") == "working"
+                            and running(existing.get("pid"),
+                                        existing.get("born")) is False):
                         existing["state"] = "waiting"
                         changed = True
                     if changed:
