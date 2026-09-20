@@ -1007,16 +1007,6 @@ def main():
                     settled = existing.get("state") == "working" and (
                         now - float(existing.get("updated", 0)) > WORKING_WINDOW)
 
-                    # The process that was doing the work is gone, so the work
-                    # is too, whatever the last event said. A hook only fires
-                    # while the session is alive, so a crash or a quit leaves
-                    # "working" behind with nothing to take it back — which is
-                    # what left rows spinning until the stall window ran out
-                    # ten minutes later. This costs one signal-zero.
-                    if existing.get("state") == "working" and running(
-                            existing.get("pid"), existing.get("born")) is False:
-                        existing["state"] = "waiting"
-                        changed = True
                     if state and tool == "codex" and mtime > float(existing.get("updated", 0)):
                         if state != existing.get("state"):
                             existing["state"] = state
@@ -1024,6 +1014,19 @@ def main():
                         changed = True
                     elif state and settled and state != existing.get("state"):
                         existing["state"] = state
+                        changed = True
+
+                    # Last word, because it is the only one that can be
+                    # checked. A hook fires only while the session is alive,
+                    # and a Codex rollout ends mid-turn whenever the app was
+                    # quit — so both of the judgements above can say "working"
+                    # about a process that is not there. This one asks the
+                    # kernel. It ran before the transcript had its say and was
+                    # being overruled by it, which is how a finished Doosan
+                    # run kept its spinner.
+                    if existing.get("state") == "working" and running(
+                            existing.get("pid"), existing.get("born")) is False:
+                        existing["state"] = "waiting"
                         changed = True
                     if changed:
                         tmp = path + ".tmp"
