@@ -363,6 +363,61 @@ def queued(entries):
     return queued_prompts(entries) > 0
 
 
+# Work a turn left running when it ended. A turn can start a command or an
+# agent in the background and stop at once ("running the e2e now"); the Stop
+# hook fires and the row reads as your turn, while the work it started goes on
+# for another half hour. The launch leaves an id in the tool result, and the
+# job reports back under that same id as a <task-notification> when it is done.
+BACKGROUND_LAUNCH = re.compile(
+    r"(?:running in background with ID:\s*|agentId:\s*)([A-Za-z0-9]+)")
+TASK_ID = re.compile(r"<task-id>([^<]+)</task-id>")
+# A job that has not reported in this long is not coming back: the session was
+# closed under it, and nothing will deliver the notice.
+BACKGROUND_WINDOW = 3 * 3600
+
+
+def background_jobs(entries, now=None):
+    """Background jobs started in these entries that have not reported back."""
+    now = now or time.time()
+    launched = {}
+    finished = set()
+    for entry in entries:
+        body = json.dumps(entry, ensure_ascii=False)
+        finished.update(TASK_ID.findall(body))
+        if entry.get("type") != "user":
+            continue
+        content = (entry.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "tool_result":
+                continue
+            for job in BACKGROUND_LAUNCH.findall(json.dumps(part.get("content"),
+                                                            ensure_ascii=False)):
+                launched[job] = entry.get("timestamp") or ""
+    pending = 0
+    for job, stamp in launched.items():
+        if job in finished:
+            continue
+        started = stamp_seconds(stamp)
+        if started and now - started > BACKGROUND_WINDOW:
+            continue
+        pending += 1
+    return pending
+
+
+def stamp_seconds(stamp):
+    if not isinstance(stamp, str) or not stamp:
+        return 0.0
+    text = stamp.replace("Z", "+0000")
+    for shape in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            return datetime.datetime.strptime(text, shape).timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
 def state_from_tail(entries, tool):
     """Whose turn it is, read off the end of the transcript.
 
@@ -889,10 +944,16 @@ def _claude_sessions_in(root, titles):
             # ~/.claude/projects/-Users-me-thing/<id>.jsonl
             folder = os.path.basename(os.path.dirname(path))
             cwd = folder.replace("-", "/", 1).replace("-", "/")
-        yield (session_id, "claude", cwd, title, chat,
-               settle(state, mtime, time.time()),
+        state = settle(state, mtime, time.time())
+        # A background job outlives the turn that launched it and writes
+        # nothing to the transcript while it runs, so the stall rule above
+        # cannot see it; it is checked after, and wins.
+        jobs = background_jobs(tail_json_lines(path, count=800))
+        if jobs and state != "working":
+            state = "working"
+        yield (session_id, "claude", cwd, title, chat, state,
                last_spoken(tail) or mtime, app, filed, "",
-               queued_prompts(tail))
+               {"queued": queued_prompts(tail), "background": jobs})
 
 
 def codex_query(path, sql):
@@ -964,7 +1025,7 @@ def codex_sessions():
                     if isinstance(text, str) and text.strip():
                         last = text
             yield (thread_id, "codex", cwd or "", last, chat, state, when, app, "",
-                   spawned_by(thread_source, source), 0)
+                   spawned_by(thread_source, source), {"queued": 0, "background": 0})
 
 
 def main():
@@ -978,7 +1039,9 @@ def main():
     remembered = recall_titles(store)
 
     for (session_id, tool, cwd, title, chat, state, mtime, app,
-         filed, origin, waiting_prompts) in list(claude_sessions()) + list(codex_sessions()):
+         filed, origin, extra) in list(claude_sessions()) + list(codex_sessions()):
+        waiting_prompts = extra.get("queued", 0)
+        jobs = extra.get("background", 0)
         path = os.path.join(STATE_DIR, "%s-%s.json" % (tool, session_id))
         seen.add(path)
         booked[path] = state
@@ -1016,6 +1079,23 @@ def main():
                     if existing.get("queued", 0) != waiting_prompts:
                         existing["queued"] = waiting_prompts
                         changed = True
+                    # The Stop hook says the turn ended; it cannot say the
+                    # turn left something running. While a job it started has
+                    # not reported back, the session is still at work.
+                    if tool == "claude":
+                        if jobs and existing.get("state") == "waiting" and running(
+                                existing.get("pid"), existing.get("born")) is not False:
+                            existing["state"] = "working"
+                            existing["background"] = jobs
+                            changed = True
+                        elif not jobs and existing.get("background"):
+                            # The job reported back. If nothing has moved the
+                            # row since, hand it back to whoever it waits on.
+                            if existing.get("state") == "working" and existing.get(
+                                    "event") in ("Stop", "StopFailure", "Notification"):
+                                existing["state"] = "waiting"
+                            existing["background"] = 0
+                            changed = True
                     # How far the transcript is allowed to overrule a hook
                     # depends on what that tool's hooks actually report.
                     #
@@ -1103,6 +1183,7 @@ def main():
             # you; the dock keeps those behind the delegated-work switch.
             "origin": origin,
             "queued": waiting_prompts,
+            "background": jobs,
             "term_program": "",
             "term_session": "",
             "window_title": "",
