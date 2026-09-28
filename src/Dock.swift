@@ -1508,10 +1508,14 @@ final class Dock {
         }
         rows = kept
 
+        // Counted by the mark each row actually wears, not by its raw state.
+        // "waiting" covers both a fresh reply and one left for hours, and the
+        // rows already draw the second as a grey dash; the tab counted it
+        // orange anyway, so it said twelve were asking while one was.
         let counts = (
-            waiting: sessions.filter { $0.state == "waiting" }.count,
-            working: sessions.filter { $0.state == "working" }.count,
-            idle: sessions.filter { $0.state == "idle" }.count
+            waiting: sessions.filter { $0.mark == .yourTurn }.count,
+            working: sessions.filter { $0.mark == .working }.count,
+            idle: sessions.filter { $0.mark == .parked }.count
         )
         lastCounts = counts
         header.set(counts: counts)
