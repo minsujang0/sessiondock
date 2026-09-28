@@ -19,6 +19,12 @@ struct Session: Codable, Equatable {
     /// "agent" when another agent handed this run its brief.
     let origin: String?
     let source: String?
+    /// Messages a person typed that are lined up to run after this turn.
+    /// Background-task notices are left out: they are not work, and counting
+    /// them kept finished sessions looking busy.
+    let queued: Int?
+
+    var queuedCount: Int { queued ?? 0 }
 
     var date: Date { Date(timeIntervalSince1970: updated) }
 

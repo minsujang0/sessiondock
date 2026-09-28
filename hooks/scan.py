@@ -320,26 +320,47 @@ def is_human_turn(entry):
 # Only one of these puts a message on the queue. Everything else takes one
 # off — a message can be dequeued to run, but it can also be removed by hand
 # or cleared along with the rest, and counting only dequeue left the depth
-# permanently above zero. A session in that state spun forever: the queue
-# check runs before the transcript is read at all, so the end of the file
-# never got a say.
+# permanently above zero.
 QUEUE_ADDS = "enqueue"
 
 
-def queued(entries):
-    """Whether messages are still lined up behind the current turn."""
-    depth = 0
+def queue_contents(entries):
+    """What is still lined up behind the current turn, oldest first.
+
+    Kept as a list rather than a count because what is waiting matters as
+    much as how much. A person's follow-up means the session will carry on by
+    itself. A `<task-notification>` — a background job reporting that it
+    finished — is not work at all: it is delivered with the next turn, and a
+    session that has already stopped keeps it queued indefinitely. Counting
+    those as queued work is what left "zombie" sessions spinning for hours
+    after everything in them had finished.
+    """
+    pending = []
     for entry in entries:
         if entry.get("type") != "queue-operation":
             continue
         if entry.get("operation") == QUEUE_ADDS:
-            depth += 1
-        else:
-            # Anything else took a message off. Held at zero because the tail
-            # is a window: its first entries can be the removals of messages
-            # queued further back than we can see.
-            depth = max(depth - 1, 0)
-    return depth > 0
+            pending.append(str(entry.get("content") or ""))
+        elif pending:
+            # dequeue, remove and clear all take from the front; the tail is
+            # a window, so a removal with nothing in front of it belongs to a
+            # message queued further back than we can see.
+            pending.pop(0)
+    return pending
+
+
+def is_synthetic(text):
+    return text.lstrip().startswith(SYNTHETIC_PREFIXES)
+
+
+def queued_prompts(entries):
+    """How many things a person typed are still waiting to run."""
+    return sum(1 for text in queue_contents(entries) if not is_synthetic(text))
+
+
+def queued(entries):
+    """Whether a person's message is lined up behind the current turn."""
+    return queued_prompts(entries) > 0
 
 
 def state_from_tail(entries, tool):
@@ -870,7 +891,8 @@ def _claude_sessions_in(root, titles):
             cwd = folder.replace("-", "/", 1).replace("-", "/")
         yield (session_id, "claude", cwd, title, chat,
                settle(state, mtime, time.time()),
-               last_spoken(tail) or mtime, app, filed, "")
+               last_spoken(tail) or mtime, app, filed, "",
+               queued_prompts(tail))
 
 
 def codex_query(path, sql):
@@ -942,7 +964,7 @@ def codex_sessions():
                     if isinstance(text, str) and text.strip():
                         last = text
             yield (thread_id, "codex", cwd or "", last, chat, state, when, app, "",
-                   spawned_by(thread_source, source))
+                   spawned_by(thread_source, source), 0)
 
 
 def main():
@@ -956,7 +978,7 @@ def main():
     remembered = recall_titles(store)
 
     for (session_id, tool, cwd, title, chat, state, mtime, app,
-         filed, origin) in list(claude_sessions()) + list(codex_sessions()):
+         filed, origin, waiting_prompts) in list(claude_sessions()) + list(codex_sessions()):
         path = os.path.join(STATE_DIR, "%s-%s.json" % (tool, session_id))
         seen.add(path)
         booked[path] = state
@@ -987,6 +1009,12 @@ def main():
                         changed = True
                     if origin and existing.get("origin") != origin:
                         existing["origin"] = origin
+                        changed = True
+                    # Messages a person typed that are lined up to run next.
+                    # The hooks cannot see the queue, so the transcript is the
+                    # only place this comes from.
+                    if existing.get("queued", 0) != waiting_prompts:
+                        existing["queued"] = waiting_prompts
                         changed = True
                     # How far the transcript is allowed to overrule a hook
                     # depends on what that tool's hooks actually report.
@@ -1074,6 +1102,7 @@ def main():
             # Empty unless the thread was opened by the agent rather than by
             # you; the dock keeps those behind the delegated-work switch.
             "origin": origin,
+            "queued": waiting_prompts,
             "term_program": "",
             "term_session": "",
             "window_title": "",

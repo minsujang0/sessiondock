@@ -454,6 +454,28 @@ final class RowView: NSView {
             NSBezierPath(ovalIn: badge.insetBy(dx: 0.5, dy: 0.5)).stroke()
         }
         drawStatus(session, in: badge, reversed: unseen)
+
+        // What is waiting behind the running turn, as a count pinned to the
+        // mark. Only while it is working: a finished turn with something still
+        // queued starts the next one by itself, and the hooks turn it back to
+        // working the moment it does.
+        if session.mark == .working && session.queuedCount > 0 {
+            let label = "\(min(session.queuedCount, 9))" as NSString
+            let font = NSFont.systemFont(ofSize: 7.5, weight: .bold)
+            let size = label.size(withAttributes: [.font: font])
+            let pill = NSRect(x: badge.maxX - 5, y: badge.minY - 3,
+                              width: max(size.width + 5, 10), height: 10)
+            let shape = NSBezierPath(roundedRect: pill, xRadius: 5, yRadius: 5)
+            session.color.setFill()
+            shape.fill()
+            (Palette.isDark ? NSColor(calibratedWhite: 0.16, alpha: 1)
+                            : NSColor.white).setStroke()
+            shape.lineWidth = 1
+            shape.stroke()
+            label.draw(at: NSPoint(x: pill.midX - size.width / 2,
+                                   y: pill.midY - size.height / 2),
+                       withAttributes: [.font: font, .foregroundColor: NSColor.white])
+        }
         x = badge.maxX + 7
 
         // which tool this session belongs to

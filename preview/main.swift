@@ -12,12 +12,14 @@ func sample(_ tool: String, _ state: String, _ chat: String, _ project: String,
             project: project, state: state, title: title, chat: chat,
             updated: Date().timeIntervalSince1970 - ago,
             started: Date().timeIntervalSince1970 - 3600, app: nil, filed: nil,
-            origin: nil, source: "scan")
+            origin: nil, source: "scan", queued: nil)
 }
 
 let sessions = [
     sample("claude", "waiting", "PR 알림을 맥 알림으로 띄우는 앱 만들어줘",
            "PycharmProjects", "카드 세 개를 띄웠습니다. 확인해 주세요."),
+    queued(sample("claude", "working", "CAD 목록에 Simulation·Mesh 개수 추가",
+                  "SolverAI-client", "", ago: 20), 2),
     sample("codex", "working", "jsp가 올린 backend pr 리뷰 ㄱ",
            "solverai-backend", "리뷰를 진행하고 있습니다."),
     sample("claude", "waiting", "PRO-792 해볼려?", "solverai-deployments", "",
@@ -26,10 +28,18 @@ let sessions = [
                      "PycharmProjects", "")),
 ]
 
+func queued(_ s: Session, _ count: Int) -> Session {
+    Session(id: s.id, tool: s.tool, cwd: s.cwd, project: s.project, state: s.state,
+            title: s.title, chat: s.chat, updated: s.updated, started: s.started,
+            app: s.app, filed: s.filed, origin: s.origin, source: s.source,
+            queued: count)
+}
+
 func delegated(_ s: Session) -> Session {
     Session(id: s.id, tool: s.tool, cwd: s.cwd, project: s.project, state: s.state,
             title: s.title, chat: s.chat, updated: s.updated, started: s.started,
-            app: s.app, filed: s.filed, origin: "agent", source: s.source)
+            app: s.app, filed: s.filed, origin: "agent", source: s.source,
+            queued: s.queued)
 }
 
 let dock = Dock()
