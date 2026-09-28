@@ -23,8 +23,20 @@ struct Session: Codable, Equatable {
     /// Background-task notices are left out: they are not work, and counting
     /// them kept finished sessions looking busy.
     let queued: Int?
+    /// Jobs this session started in the background that have not reported
+    /// back yet — commands, agents, monitors, workflows.
+    let background: Int?
 
     var queuedCount: Int { queued ?? 0 }
+    var backgroundCount: Int { background ?? 0 }
+
+    /// What is going on besides the turn itself, in words, for the open row.
+    var activity: String {
+        var parts: [String] = []
+        if backgroundCount > 0 { parts.append("백그라운드 작업 \(backgroundCount)개") }
+        if queuedCount > 0 { parts.append("대기 메시지 \(queuedCount)개") }
+        return parts.joined(separator: " · ")
+    }
 
     var date: Date { Date(timeIntervalSince1970: updated) }
 

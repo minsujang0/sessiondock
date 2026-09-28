@@ -369,12 +369,54 @@ def queued(entries):
 # for another half hour. The launch leaves an id in the tool result, and the
 # job reports back under that same id as a <task-notification> when it is done.
 BACKGROUND_LAUNCH = re.compile(
-    r"(?:running in background with ID:\s*|agentId:\s*"
+    r"(?:with ID:\s*|\(ID:\s*|agentId:\s*"
     r"|Monitor started \(task\s+|Task ID:\s*)([A-Za-z0-9]+)")
 TASK_ID = re.compile(r"<task-id>([^<]+)</task-id>")
 # A job that has not reported in this long is not coming back: the session was
 # closed under it, and nothing will deliver the notice.
 BACKGROUND_WINDOW = 3 * 3600
+
+
+# How each tool announces that it left something running. Matched only at the
+# start of that tool's own result: a session that reads another session's
+# transcript quotes these same phrases in its output, and matching them
+# anywhere counted fifty jobs for a session that had launched none.
+LAUNCH_OPENINGS = (
+    "Command running in background",
+    "Command did not complete within",   # a foreground call moved to background
+    "Async agent launched",
+    "Monitor started",
+    "Workflow launched in background",
+)
+
+
+def _result_text(part):
+    content = part.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(item.get("text", "") for item in content
+                       if isinstance(item, dict))
+    return ""
+
+
+def _notice_ids(entry):
+    """Task ids from a completion notice, and only from one."""
+    texts = []
+    if entry.get("type") == "queue-operation":
+        texts.append(str(entry.get("content") or ""))
+    elif entry.get("type") == "user":
+        content = (entry.get("message") or {}).get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts.extend(item.get("text", "") for item in content
+                         if isinstance(item, dict) and item.get("type") == "text")
+    ids = []
+    for text in texts:
+        if text.lstrip().startswith("<task-notification>"):
+            ids.extend(TASK_ID.findall(text))
+    return ids
 
 
 def background_jobs(entries, now=None):
@@ -383,8 +425,7 @@ def background_jobs(entries, now=None):
     launched = {}
     finished = set()
     for entry in entries:
-        body = json.dumps(entry, ensure_ascii=False)
-        finished.update(TASK_ID.findall(body))
+        finished.update(_notice_ids(entry))
         if entry.get("type") != "user":
             continue
         content = (entry.get("message") or {}).get("content")
@@ -393,8 +434,10 @@ def background_jobs(entries, now=None):
         for part in content:
             if not isinstance(part, dict) or part.get("type") != "tool_result":
                 continue
-            for job in BACKGROUND_LAUNCH.findall(json.dumps(part.get("content"),
-                                                            ensure_ascii=False)):
+            opening = _result_text(part).lstrip()[:240]
+            if not opening.startswith(LAUNCH_OPENINGS):
+                continue
+            for job in BACKGROUND_LAUNCH.findall(opening)[:1]:
                 launched[job] = entry.get("timestamp") or ""
     pending = 0
     for job, stamp in launched.items():

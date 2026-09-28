@@ -455,12 +455,13 @@ final class RowView: NSView {
         }
         drawStatus(session, in: badge, reversed: unseen)
 
-        // What is waiting behind the running turn, as a count pinned to the
-        // mark. Only while it is working: a finished turn with something still
-        // queued starts the next one by itself, and the hooks turn it back to
-        // working the moment it does.
-        if session.mark == .working && session.queuedCount > 0 {
-            let label = "\(min(session.queuedCount, 9))" as NSString
+        // How much is in flight, as a count pinned to the mark: background
+        // jobs the session started, plus follow-ups a person queued behind
+        // the turn. Only while it is working — the number is "how many things
+        // are running for this row", and a row that is not running has none.
+        let inFlight = session.backgroundCount + session.queuedCount
+        if session.mark == .working && inFlight > 0 {
+            let label = (inFlight > 9 ? "9+" : "\(inFlight)") as NSString
             let font = NSFont.systemFont(ofSize: 7.5, weight: .bold)
             let size = label.size(withAttributes: [.font: font])
             let pill = NSRect(x: badge.maxX - 5, y: badge.minY - 3,
@@ -554,7 +555,9 @@ final class RowView: NSView {
                              width: max(20, right - x), height: 16))
 
         guard open else { return }
-        let detail = session.title.isEmpty ? session.cwd : session.title
+        // The open row says what the count on the badge is made of.
+        let base = session.title.isEmpty ? session.cwd : session.title
+        let detail = session.activity.isEmpty ? base : session.activity + "  —  " + base
         (detail as NSString).draw(
             in: NSRect(x: Layout.padding + 14, y: Layout.rowHeight - 4,
                        width: bounds.width - Layout.padding * 2 - 14,

@@ -12,7 +12,7 @@ func sample(_ tool: String, _ state: String, _ chat: String, _ project: String,
             project: project, state: state, title: title, chat: chat,
             updated: Date().timeIntervalSince1970 - ago,
             started: Date().timeIntervalSince1970 - 3600, app: nil, filed: nil,
-            origin: nil, source: "scan", queued: nil)
+            origin: nil, source: "scan", queued: nil, background: nil)
 }
 
 let sessions = [
@@ -32,14 +32,14 @@ func queued(_ s: Session, _ count: Int) -> Session {
     Session(id: s.id, tool: s.tool, cwd: s.cwd, project: s.project, state: s.state,
             title: s.title, chat: s.chat, updated: s.updated, started: s.started,
             app: s.app, filed: s.filed, origin: s.origin, source: s.source,
-            queued: count)
+            queued: count, background: 2)
 }
 
 func delegated(_ s: Session) -> Session {
     Session(id: s.id, tool: s.tool, cwd: s.cwd, project: s.project, state: s.state,
             title: s.title, chat: s.chat, updated: s.updated, started: s.started,
             app: s.app, filed: s.filed, origin: "agent", source: s.source,
-            queued: s.queued)
+            queued: s.queued, background: s.background)
 }
 
 let dock = Dock()
