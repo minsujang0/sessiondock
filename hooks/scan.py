@@ -369,7 +369,8 @@ def queued(entries):
 # for another half hour. The launch leaves an id in the tool result, and the
 # job reports back under that same id as a <task-notification> when it is done.
 BACKGROUND_LAUNCH = re.compile(
-    r"(?:running in background with ID:\s*|agentId:\s*)([A-Za-z0-9]+)")
+    r"(?:running in background with ID:\s*|agentId:\s*"
+    r"|Monitor started \(task\s+|Task ID:\s*)([A-Za-z0-9]+)")
 TASK_ID = re.compile(r"<task-id>([^<]+)</task-id>")
 # A job that has not reported in this long is not coming back: the session was
 # closed under it, and nothing will deliver the notice.
@@ -1122,6 +1123,19 @@ def main():
                         changed = True
                     elif state and settled and state != existing.get("state"):
                         existing["state"] = state
+                        changed = True
+                    # A turn woken by a background job's notice, not by a
+                    # person. No prompt was submitted, so UserPromptSubmit
+                    # never fires, and the record keeps the "waiting" the last
+                    # Stop left while the session works through the result.
+                    # The transcript shows it: written to after the hook's
+                    # last word, with a tool still in flight. The turn's own
+                    # Stop hands it back when it ends.
+                    elif (tool == "claude" and state == "working"
+                          and existing.get("state") == "waiting"
+                          and mtime > float(existing.get("updated", 0)) + 2):
+                        existing["state"] = "working"
+                        existing["updated"] = mtime
                         changed = True
 
                     # Last word, because it is the only one that can be
