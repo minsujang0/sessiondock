@@ -1040,12 +1040,19 @@ def codex_sessions():
     for home, app in codex_homes():
         # `name` is the summarised title Codex shows once it has one; `title`
         # is only ever the first message. Prefer the summary, fall back to it.
+        # `recency_at` is when the conversation last moved — the time Codex
+        # sorts its own sidebar by. `updated_at` is when the row was last
+        # written, and opening the app writes a thread_settings_applied event
+        # into old threads, which bumps it to now: a dozen threads from days
+        # ago flooded the dock every time the app was launched. Older homes
+        # have no recency_at, so it falls back to updated_at there.
         rows = codex_query(os.path.join(home, "state_5.sqlite"), """
-            SELECT id, COALESCE(NULLIF(name, ''), title), cwd, updated_at, rollout_path,
-                   thread_source, source
+            SELECT id, COALESCE(NULLIF(name, ''), title), cwd,
+                   COALESCE(NULLIF(recency_at, 0), updated_at) AS moved,
+                   rollout_path, thread_source, source
               FROM threads
              WHERE archived = 0
-             ORDER BY updated_at DESC
+             ORDER BY moved DESC
              LIMIT 60
         """)
         for (thread_id, title, cwd, updated_at, rollout_path,
