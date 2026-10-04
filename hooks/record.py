@@ -13,6 +13,7 @@ the switcher to draw a row and route a click:
 `state` is one of: working, waiting, idle, done.
 """
 
+import datetime
 import json
 import os
 import subprocess
@@ -181,6 +182,58 @@ def started_at(pid):
         return 0.0
 
 
+def last_entry_time(path):
+    """The timestamp of the last entry in a transcript, or 0."""
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 65536))
+            lines = fh.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return 0.0
+    for line in reversed(lines):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            stamp = json.loads(line).get("timestamp")
+        except ValueError:
+            continue
+        if not isinstance(stamp, str):
+            continue
+        text = stamp.replace("Z", "+0000")
+        for shape in ("%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
+            try:
+                return datetime.datetime.strptime(text, shape).timestamp()
+            except ValueError:
+                continue
+    return 0.0
+
+
+def when_moved(event, payload, previous):
+    """When the conversation last moved, which is not always now.
+
+    Reopening a session fires SessionStart, and so does the app restoring the
+    sessions it had open — nothing has been said, but every one of them was
+    stamped with the moment of launch and jumped into the recent window
+    together. A session that already existed keeps the time it last moved;
+    only a genuinely new one starts now.
+    """
+    now = time.time()
+    if event != "SessionStart":
+        return now
+    if str(payload.get("source") or "") == "startup" and not previous:
+        return now
+    if previous.get("updated"):
+        return float(previous["updated"])
+    path = payload.get("transcript_path")
+    if isinstance(path, str) and path:
+        moved = last_entry_time(os.path.expanduser(path))
+        if moved:
+            return moved
+    return now
+
+
 def main():
     payload = read_payload()
     event = event_name()
@@ -252,7 +305,7 @@ def main():
         "state": state or previous.get("state") or "working",
         "title": title,
         "event": event,
-        "updated": time.time(),
+        "updated": when_moved(event, payload, previous),
         "started": previous.get("started") or time.time(),
         # Refreshed every time, not kept from the first event: a session
         # resumed in a new process kept pointing at the old one, which is

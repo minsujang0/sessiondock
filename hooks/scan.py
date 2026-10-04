@@ -1124,6 +1124,15 @@ def main():
                     if origin and existing.get("origin") != origin:
                         existing["origin"] = origin
                         changed = True
+                    # A record whose last word was SessionStart has only been
+                    # opened since it last moved. Hooks written before that was
+                    # understood stamped it with the moment of opening; put it
+                    # back to when the conversation actually last moved.
+                    if (tool == "claude" and existing.get("event") == "SessionStart"
+                            and mtime and mtime < float(existing.get("updated", 0))):
+                        existing["updated"] = mtime
+                        changed = True
+
                     # Messages a person typed that are lined up to run next.
                     # The hooks cannot see the queue, so the transcript is the
                     # only place this comes from.
