@@ -811,8 +811,13 @@ final class MoreCard: CardView {
         view.needsDisplay = true
     }
 
-    func press() { dock?.reachFurther() }
-    func goHome() { dock?.reachHome() }
+    /// The same ledge serves more than one purpose: reaching further back in
+    /// time, and folding the quiet sessions away. Unset, it reaches.
+    var pressAction: (() -> Void)?
+    var homeAction: (() -> Void)?
+
+    func press() { if let pressAction { pressAction() } else { dock?.reachFurther() } }
+    func goHome() { if let homeAction { homeAction() } else { dock?.reachHome() } }
 }
 
 final class MoreView: NSView {
@@ -1160,6 +1165,14 @@ final class NubView: NSView {
 /// around every row would swallow them.
 final class DockContent: NSView {
 
+    /// Scrolling is the column's, wherever over it the pointer is: a row
+    /// does not handle the wheel, so the event climbs to here.
+    override func scrollWheel(with event: NSEvent) {
+        let delta = event.hasPreciseScrollingDeltas
+            ? event.scrollingDeltaY : event.scrollingDeltaY * 12
+        dock?.scroll(by: delta)
+    }
+
     private var shadows: [CALayer] = []
 
     /// A shadow behind every card, kept light on purpose.
@@ -1432,7 +1445,26 @@ final class Dock {
     private lazy var window = DockWindow(dock: self)
     private lazy var header = HeaderCard(dock: self)
     private lazy var more = MoreCard(dock: self)
+    private lazy var quiet: MoreCard = {
+        let card = MoreCard(dock: self)
+        card.pressAction = { [weak self] in self?.toggleQuiet() }
+        return card
+    }()
     private lazy var nub = NubCard(dock: self)
+
+    /// A session that has been waiting this long is no longer asking: it is
+    /// folded into one line at the bottom rather than given a row of its own.
+    /// Half an hour was too short — work left for an hour is still work being
+    /// come back to — but a busy day left sixty of these and the column ran
+    /// off the screen.
+    static let quietAfter: TimeInterval = 2 * 3600
+    private var showQuiet = false
+
+    /// How far the rows are scrolled, in whole rows, when the column is taller
+    /// than the screen allows. Only the rows move; the header stays on top and
+    /// the ledges stay at the bottom.
+    private var scrolledRows = 0
+    private var scrollCarry: CGFloat = 0
 
     /// Whether the column is showing while folded, because the pointer is on
     /// the tab. It lasts as long as the pointer does, so it is held here
@@ -1454,6 +1486,7 @@ final class Dock {
     func start() {
         window.content.cardHost.addSubview(header)
         window.content.cardHost.addSubview(more)
+        window.content.cardHost.addSubview(quiet)
         window.content.cardHost.addSubview(nub)
         reload()
         reloadTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
@@ -1494,8 +1527,15 @@ final class Dock {
             return
         }
 
+        let now = Date().timeIntervalSince1970
+        let isQuiet: (Session) -> Bool = {
+            $0.mark != .working && now - $0.updated >= Dock.quietAfter
+        }
+        let quietCount = sessions.filter(isQuiet).count
+        let shown = showQuiet ? sessions : sessions.filter { !isQuiet($0) }
+
         var kept: [RowCard] = []
-        for session in sessions {
+        for session in shown {
             if let existing = rows.first(where: { $0.session?.id == session.id }) {
                 existing.update(session)
                 kept.append(existing)
@@ -1538,6 +1578,15 @@ final class Dock {
         } else {
             more.isHidden = true
         }
+        if quietCount > 0 {
+            quiet.set(label: showQuiet ? "조용한 세션 접기"
+                                       : "2시간 넘게 조용한 세션 \(quietCount)개",
+                      home: false)
+            quiet.isHidden = false
+        } else {
+            quiet.isHidden = true
+            showQuiet = false
+        }
         if !window.isVisible { window.orderFrontRegardless() }
 
         layout(animated: true)
@@ -1575,7 +1624,7 @@ final class Dock {
         // nothing had really changed.
         let reach = Layout.gap / 2
         let target = rows.first {
-            $0.frame.insetBy(dx: 0, dy: -reach).contains(point)
+            !$0.isHidden && $0.frame.insetBy(dx: 0, dy: -reach).contains(point)
         }
         var changed = false
         for card in rows {
@@ -1603,8 +1652,15 @@ final class Dock {
         var stack = Layout.headerHeight + Layout.gap
         if Settings.shared.collapsed { stack += NubCard.size.height + Layout.gap }
         if !more.isHidden { stack += Layout.headerHeight + Layout.gap }
+        if !quiet.isHidden { stack += Layout.headerHeight + Layout.gap }
         for _ in rows { stack += Layout.rowHeight + Layout.gap }
-        let tallest = stack + Layout.detailMax
+        let wantedHeight = stack + Layout.detailMax
+
+        // Never taller than the screen leaves above the anchor. Past that the
+        // rows scroll, a whole row at a time, under a header that stays put.
+        let room = screen.visibleFrame.height - Layout.inset * 2 - offset.height
+        let tallest = min(wantedHeight, max(room, Layout.headerHeight * 4))
+        let overflowing = wantedHeight > tallest
         let size = NSSize(width: Layout.width + pad * 2, height: tallest + pad * 2)
 
         let origin = NSPoint(x: right - Layout.width - pad, y: bottom - pad)
@@ -1619,7 +1675,7 @@ final class Dock {
         nub.isHidden = !collapsed
         header.isHidden = folded
         rows.forEach { $0.isHidden = folded }
-        if folded { more.isHidden = true }
+        if folded { more.isHidden = true; quiet.isHidden = true }
 
         if folded {
             let span = NubCard.width(for: lastCounts)
@@ -1647,18 +1703,54 @@ final class Dock {
         let ledge = more.isHidden ? nil
             : NSRect(x: pad, y: y, width: Layout.width, height: Layout.headerHeight)
         if ledge != nil { y += Layout.headerHeight + Layout.gap }
+        // The quiet sessions, folded, sit just above it: they are the oldest
+        // of what is shown, so this is where they would have been.
+        let hush = quiet.isHidden ? nil
+            : NSRect(x: pad, y: y, width: Layout.width, height: Layout.headerHeight)
+        if hush != nil { y += Layout.headerHeight + Layout.gap }
 
         var targets: [(RowCard, NSRect)] = []
-        for card in rows.reversed() {
-            let height = (card.isOpen ? card.expandedSize : card.collapsedSize).height
-            targets.append((card, NSRect(x: pad, y: y, width: Layout.width, height: height)))
-            y += height + Layout.gap
+        var hidden = Set<ObjectIdentifier>()
+        let crown: NSRect
+        if overflowing {
+            // Pinned: header at the top of the window, rows filling down from
+            // it, the ones that do not fit hidden until scrolled to.
+            let top = pad + tallest - Layout.headerHeight
+            crown = NSRect(x: pad, y: top, width: Layout.width, height: Layout.headerHeight)
+            let floor = y
+            let ceiling = top - Layout.gap
+            let pitch = Layout.rowHeight + Layout.gap
+            let fits = max(1, Int((ceiling - floor - Layout.detailMax) / pitch))
+            scrolledRows = min(max(scrolledRows, 0), max(rows.count - fits, 0))
+            var cursor = ceiling
+            for (index, card) in rows.enumerated() {
+                let height = (card.isOpen ? card.expandedSize : card.collapsedSize).height
+                if index < scrolledRows {
+                    hidden.insert(ObjectIdentifier(card))
+                    targets.append((card, NSRect(x: pad, y: ceiling, width: Layout.width,
+                                                 height: height)))
+                    continue
+                }
+                let box = NSRect(x: pad, y: cursor - height, width: Layout.width, height: height)
+                if box.minY < floor { hidden.insert(ObjectIdentifier(card)) }
+                targets.append((card, box))
+                cursor -= height + Layout.gap
+            }
+        } else {
+            scrolledRows = 0
+            for card in rows.reversed() {
+                let height = (card.isOpen ? card.expandedSize : card.collapsedSize).height
+                targets.append((card, NSRect(x: pad, y: y, width: Layout.width, height: height)))
+                y += height + Layout.gap
+            }
+            crown = NSRect(x: pad, y: y, width: Layout.width, height: Layout.headerHeight)
         }
-        let crown = NSRect(x: pad, y: y, width: Layout.width, height: Layout.headerHeight)
+        for card in rows { card.isHidden = hidden.contains(ObjectIdentifier(card)) }
 
         let moved = targets.filter { $0.0.targetFrame != $0.1 }
         moved.forEach { $0.0.setTarget($0.1) }
-        guard !moved.isEmpty || header.frame != crown else { return }
+        guard !moved.isEmpty || header.frame != crown
+                || (hush != nil && quiet.frame != hush!) else { return }
 
         NSAnimationContext.runAnimationGroup { context in
             context.duration = animated ? Layout.duration : 0
@@ -1672,11 +1764,13 @@ final class Dock {
             if animated {
                 self.header.animator().frame = crown
                 if let ledge { self.more.animator().frame = ledge }
+                if let hush { self.quiet.animator().frame = hush }
                 if let tab { self.nub.animator().frame = tab }
                 for (card, box) in moved { card.animator().frame = box }
             } else {
                 self.header.frame = crown
                 if let ledge { self.more.frame = ledge }
+                if let hush { self.quiet.frame = hush }
                 if let tab { self.nub.frame = tab }
                 for (card, box) in moved { card.frame = box }
             }
@@ -1693,13 +1787,35 @@ final class Dock {
         // fallback.
         var boxes: [(NSRect, CGFloat)] = [(crown, Layout.headerHeight / 2)]
         if let ledge { boxes.append((ledge, Layout.headerHeight / 2)) }
+        if let hush { boxes.append((hush, Layout.headerHeight / 2)) }
         if let tab { boxes.append((tab, NubCard.size.height / 2)) }
-        for (card, box) in targets { boxes.append((box, Layout.corner)) }
+        for (card, box) in targets where !hidden.contains(ObjectIdentifier(card)) {
+            boxes.append((box, Layout.corner))
+        }
         window.content.castShadows(boxes)
 
     }
 
     /// One rung further back, or all the way home from the last one.
+    func toggleQuiet() {
+        showQuiet.toggle()
+        scrolledRows = 0
+        reload()
+    }
+
+    /// Wheel or trackpad over the column. Moves a whole row per step so a row
+    /// is never left half under the header.
+    func scroll(by delta: CGFloat) {
+        scrollCarry += delta
+        let step = Layout.rowHeight + Layout.gap
+        let rowsMoved = Int(scrollCarry / step)
+        guard rowsMoved != 0 else { return }
+        scrollCarry -= CGFloat(rowsMoved) * step
+        // Wheel down (negative delta) shows older rows further down the list.
+        scrolledRows -= rowsMoved
+        layout(animated: true)
+    }
+
     func reachFurther() {
         guard let next = SessionStore.reaches.first(where: { $0 > reach }), older > 0
         else { return }
