@@ -36,14 +36,72 @@ enum Route {
         // not the one holding the thread. The scan recorded which app the
         // session's home belongs to, so open the link against that copy.
         if let bundle = ownerApp(for: session) {
-            log("딥링크: \(url.absoluteString) → \(bundle.lastPathComponent)")
-            NSWorkspace.shared.open([url], withApplicationAt: bundle,
-                                    configuration: NSWorkspace.OpenConfiguration())
+            deliver(url, to: bundle)
             return
         }
 
         log("딥링크: \(url.absoluteString)")
         NSWorkspace.shared.open(url)
+    }
+
+    /// Copies of the app we started that have not finished starting, and the
+    /// link to hand each once it has.
+    private static var starting: [String: URL] = [:]
+
+    /// Open a link against one copy of the app, without stacking up windows.
+    ///
+    /// A link sent to a running copy lands in the window it already has —
+    /// measured, six windows stayed six after links to an open session, to a
+    /// different one, and to one with no window. A link sent while the copy
+    /// is still starting does not: each became a window of its own, and a
+    /// launch takes long enough that a second or third click is the natural
+    /// thing to do. Three clicks during one launch left three windows. So a
+    /// copy that is not running gets the first link to start it, and any
+    /// further ones wait and the last of them is delivered once it is up.
+    static func deliver(_ url: URL, to bundle: URL) {
+        let key = bundle.path
+        let id = bundleID(at: bundle) ?? ""
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: id)
+            .contains { $0.isFinishedLaunching }
+
+        if starting[key] != nil {
+            log("딥링크 보류(실행 중인 앱 기다림): \(url.absoluteString) → \(bundle.lastPathComponent)")
+            starting[key] = url
+            return
+        }
+
+        log("딥링크: \(url.absoluteString) → \(bundle.lastPathComponent)")
+        if running {
+            NSWorkspace.shared.open([url], withApplicationAt: bundle,
+                                    configuration: NSWorkspace.OpenConfiguration())
+            return
+        }
+
+        starting[key] = url
+        NSWorkspace.shared.open([url], withApplicationAt: bundle,
+                                configuration: NSWorkspace.OpenConfiguration()) { app, _ in
+            DispatchQueue.main.async { waitUntilUp(app, key: key, bundle: bundle, first: url) }
+        }
+    }
+
+    /// Poll until the copy reports it has finished launching, give its window
+    /// a moment to come up, then send the last link that was held back.
+    private static func waitUntilUp(_ app: NSRunningApplication?, key: String,
+                                    bundle: URL, first: URL, tries: Int = 0) {
+        let up = app?.isFinishedLaunching ?? true
+        if !up && tries < 40 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                waitUntilUp(app, key: key, bundle: bundle, first: first, tries: tries + 1)
+            }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            let last = starting.removeValue(forKey: key)
+            guard let last, last != first else { return }
+            log("보류한 딥링크 전달: \(last.absoluteString) → \(bundle.lastPathComponent)")
+            NSWorkspace.shared.open([last], withApplicationAt: bundle,
+                                    configuration: NSWorkspace.OpenConfiguration())
+        }
     }
 
     /// The copy of the app this session actually lives in, when the scan
